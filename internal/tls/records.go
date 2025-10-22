@@ -33,14 +33,9 @@ type Record struct {
 	Payload     []byte
 }
 
-// ReadResult bundles the parsed record with the raw bytes consumed from the client.
-type ReadResult struct {
-	Record *Record
-	Raw    []byte
-}
-
 // ReadInitialRecord reads the first TLS record from conn with an optional timeout and size cap.
-func ReadInitialRecord(conn net.Conn, timeout time.Duration, maxSize int) (*ReadResult, error) {
+// It returns the parsed Record, the raw bytes read, and any error encountered.
+func ReadInitialRecord(conn net.Conn, timeout time.Duration, maxSize int) (*Record, []byte, error) {
 	if timeout > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(timeout))
 		defer conn.SetReadDeadline(time.Time{})
@@ -53,35 +48,50 @@ func ReadInitialRecord(conn net.Conn, timeout time.Duration, maxSize int) (*Read
 	total = append(total, header[:n]...)
 	if err != nil {
 		if len(total) == 0 {
-			return nil, err
+			return nil, nil, err
 		}
-		return &ReadResult{Raw: total}, err
+		return nil, total, err
 	}
 
 	length := int(binary.BigEndian.Uint16(header[3:5]))
 	if length > maxSize {
-		return &ReadResult{Raw: total}, ErrRecordTooLarge
+		return nil, total, ErrRecordTooLarge
 	}
 
 	payload := make([]byte, length)
 	m, err := io.ReadFull(conn, payload)
 	total = append(total, payload[:m]...)
 	if err != nil {
-		return &ReadResult{Raw: total}, err
+		return nil, total, err
 	}
 
-	return &ReadResult{
-		Record: &Record{
-			ContentType: header[0],
-			Version:     binary.BigEndian.Uint16(header[1:3]),
-			Payload:     payload,
-		},
-		Raw: append([]byte(nil), total...),
-	}, nil
+	record := &Record{
+		ContentType: header[0],
+		Version:     binary.BigEndian.Uint16(header[1:3]),
+		Payload:     payload,
+	}
+	return record, append([]byte(nil), total...), nil
+}
+
+// WriteRecords emits one or more TLS records to conn with an optional random gap between the first two.
+func WriteRecords(conn net.Conn, records []Record, gapMin, gapMax time.Duration) error {
+	for idx, rec := range records {
+		if err := rec.Write(conn); err != nil {
+			return err
+		}
+
+		if idx == 0 && len(records) > 1 {
+			gap := selectGapDuration(gapMin, gapMax)
+			if gap > 0 {
+				time.Sleep(gap)
+			}
+		}
+	}
+	return nil
 }
 
 // SplitClientHello divides a ClientHello handshake across one or two new TLS records.
-func SplitClientHello(rec *Record, first int) ([]Record, error) {
+func (rec *Record) SplitClientHello(first int) ([]Record, error) {
 	if rec.ContentType != recordTypeHandshake {
 		return nil, ErrNotHandshake
 	}
@@ -114,36 +124,24 @@ func SplitClientHello(rec *Record, first int) ([]Record, error) {
 	}, nil
 }
 
-// WriteRecords emits one or more TLS records to conn with an optional random gap between the first two.
-func WriteRecords(conn net.Conn, records []Record, gapMin, gapMax time.Duration) error {
-	for idx, rec := range records {
-		length := len(rec.Payload)
-		if length > 0xFFFF {
-			return fmt.Errorf("record payload too large: %d", length)
-		}
-		header := []byte{
-			rec.ContentType,
-			byte(rec.Version >> 8),
-			byte(rec.Version),
-			byte(length >> 8),
-			byte(length),
-		}
+// Write emits a single TLS record to conn using writev for zero-copy operation.
+func (rec *Record) Write(conn net.Conn) error {
+	length := len(rec.Payload)
+	if length > 0xFFFF {
+		return fmt.Errorf("record payload too large: %d", length)
+	}
+	header := []byte{
+		rec.ContentType,
+		byte(rec.Version >> 8),
+		byte(rec.Version),
+		byte(length >> 8),
+		byte(length),
+	}
 
-		if _, err := conn.Write(header); err != nil {
-			return fmt.Errorf("write record header: %w", err)
-		}
-		if length > 0 {
-			if _, err := conn.Write(rec.Payload); err != nil {
-				return fmt.Errorf("write record payload: %w", err)
-			}
-		}
-
-		if idx == 0 && len(records) > 1 {
-			gap := selectGapDuration(gapMin, gapMax)
-			if gap > 0 {
-				time.Sleep(gap)
-			}
-		}
+	// Use net.Buffers to write header and payload in a single writev syscall
+	buffers := net.Buffers{header, rec.Payload}
+	if _, err := buffers.WriteTo(conn); err != nil {
+		return fmt.Errorf("write record: %w", err)
 	}
 	return nil
 }

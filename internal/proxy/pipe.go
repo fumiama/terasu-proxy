@@ -9,7 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func pipeBidirectional(log *logrus.Entry, client, upstream net.Conn) {
+func pipe(log *logrus.Entry, client, upstream net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 

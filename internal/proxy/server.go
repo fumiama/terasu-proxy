@@ -138,33 +138,33 @@ func (s *Server) handleConn(ctx context.Context, client net.Conn) {
 	}()
 	defer close(stopCh)
 
-	recordResult, err := tls.ReadInitialRecord(client, s.config.ReadTimeout, s.config.MaxRecordSize)
+	record, rawBytes, err := tls.ReadInitialRecord(client, s.config.ReadTimeout, s.config.MaxRecordSize)
 	if err != nil {
-		if recordResult != nil && len(recordResult.Raw) > 0 {
-			if _, writeErr := upstream.Write(recordResult.Raw); writeErr != nil {
+		if len(rawBytes) > 0 {
+			if _, writeErr := upstream.Write(rawBytes); writeErr != nil {
 				connLog.WithError(writeErr).Warn("forward partial data to upstream failed")
 				return
 			}
 		}
 		connLog.WithError(err).Debug("falling back to transparent piping after read failure")
-		pipeBidirectional(connLog, client, upstream)
+		pipe(connLog, client, upstream)
 		return
 	}
 
-	records, err := tls.SplitClientHello(recordResult.Record, s.config.FirstFragment)
+	records, err := record.SplitClientHello(s.config.FirstFragment)
 	if err != nil {
 		if errors.Is(err, tls.ErrNotHandshake) || errors.Is(err, tls.ErrNotClientHello) {
 			connLog.Debug("first record not ClientHello handshake; forwarding transparently")
 		} else {
 			connLog.WithError(err).Warn("unable to split ClientHello; forwarding transparently")
 		}
-		if len(recordResult.Raw) > 0 {
-			if _, writeErr := upstream.Write(recordResult.Raw); writeErr != nil {
+		if len(rawBytes) > 0 {
+			if _, writeErr := upstream.Write(rawBytes); writeErr != nil {
 				connLog.WithError(writeErr).Warn("forward initial record upstream failed")
 				return
 			}
 		}
-		pipeBidirectional(connLog, client, upstream)
+		pipe(connLog, client, upstream)
 		return
 	}
 
@@ -178,5 +178,5 @@ func (s *Server) handleConn(ctx context.Context, client net.Conn) {
 		connLog.Debug("forwarded ClientHello without splitting (first fragment disabled)")
 	}
 
-	pipeBidirectional(connLog, client, upstream)
+	pipe(connLog, client, upstream)
 }
