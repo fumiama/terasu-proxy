@@ -28,12 +28,12 @@ go build -o terasu-proxy
 ### Serving
 
 ```bash
-terasu-proxy --listen :15000 --first 3
+terasu-proxy --listen :15001 --first 3
 ```
 
-### Proxing
+### Proxying
 
-To enable transparent proxing:
+To enable transparent proxying:
 
 ```bash
 ./scripts/setup.sh install
